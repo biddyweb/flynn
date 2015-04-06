@@ -117,7 +117,7 @@ func (c *controllerAPI) GetDeployment(ctx context.Context, w http.ResponseWriter
 		return
 	}
 	if strings.Contains(req.Header.Get("Accept"), "text/event-stream") {
-		if err := streamDeploymentEvents(ctx, deployment.ID, w, c.deploymentRepo); err != nil {
+		if err := streamDeploymentEvents(ctx, req, w, deployment.ID, c.deploymentRepo); err != nil {
 			respondWithError(w, err)
 		}
 		return
@@ -199,7 +199,15 @@ func (c *controllerAPI) CreateDeployment(ctx context.Context, w http.ResponseWri
 	httphelper.JSON(w, 200, deployment)
 }
 
-func streamDeploymentEvents(ctx context.Context, deploymentID string, w http.ResponseWriter, repo *DeploymentRepo) (err error) {
+func streamDeploymentEvents(ctx context.Context, req *http.Request, w http.ResponseWriter, deploymentID string, repo *DeploymentRepo) (err error) {
+	var lastID int64
+	if req.Header.Get("Last-Event-Id") != "" {
+		lastID, err = strconv.ParseInt(req.Header.Get("Last-Event-Id"), 10, 64)
+		if err != nil {
+			return ct.ValidationError{Field: "Last-Event-Id", Message: "is invalid"}
+		}
+	}
+
 	l, _ := ctxhelper.LoggerFromContext(ctx)
 	log := l.New("fn", "streamDeploymentEvents", "id", deploymentID)
 	ch := make(chan *ct.DeploymentEvent)
@@ -219,7 +227,7 @@ func streamDeploymentEvents(ctx context.Context, deploymentID string, w http.Res
 	}
 	defer listener.Close()
 
-	events, err := repo.listEvents(deploymentID, 0)
+	events, err := repo.listEvents(deploymentID, lastID)
 	if err != nil {
 		return
 	}

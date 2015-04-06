@@ -57,8 +57,7 @@ func (s *S) TestStreamDeployment(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(d.ID, Not(Equals), "")
 	events := make(chan *ct.DeploymentEvent)
-	stream, err := s.c.StreamDeployment(d.ID, events)
-	c.Assert(err, IsNil)
+	stream := s.c.StreamDeployment(d.ID, events)
 	defer stream.Close()
 
 	// send fake event

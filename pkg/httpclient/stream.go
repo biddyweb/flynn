@@ -5,7 +5,9 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"time"
 
+	"github.com/flynn/flynn/pkg/attempt"
 	"github.com/flynn/flynn/pkg/sse"
 	"github.com/flynn/flynn/pkg/stream"
 )
@@ -21,7 +23,14 @@ import (
 */
 func Stream(res *http.Response, outputCh interface{}) stream.Stream {
 	stream := stream.New()
-	chanValue := reflect.ValueOf(outputCh)
+
+	var chanValue reflect.Value
+	if v, ok := outputCh.(reflect.Value); ok {
+		chanValue = v
+	} else {
+		chanValue = reflect.ValueOf(outputCh)
+	}
+
 	stopChanValue := reflect.ValueOf(stream.StopCh)
 	msgType := chanValue.Type().Elem().Elem()
 	go func() {
@@ -64,6 +73,64 @@ func Stream(res *http.Response, outputCh interface{}) stream.Stream {
 			case 0:
 				return
 			default:
+			}
+		}
+	}()
+	return stream
+}
+
+var connectAttempts = attempt.Strategy{
+	Total: 10 * time.Second,
+	Delay: 100 * time.Millisecond,
+}
+
+func ResumingStream(connect func(int64) (*http.Response, error), outputCh interface{}) stream.Stream {
+	stream := stream.New()
+	outValue := reflect.ValueOf(outputCh)
+	stopChanValue := reflect.ValueOf(stream.StopCh)
+	go func() {
+		var lastID int64
+		defer outValue.Close()
+		for {
+			var res *http.Response
+			err := connectAttempts.Run(func() (err error) {
+				res, err = connect(lastID)
+				return
+			})
+			if err != nil {
+				stream.Error = err
+				return
+			}
+			chanValue := reflect.MakeChan(outValue.Type(), 0)
+			s := Stream(res, chanValue)
+		loop:
+			for {
+				chosen, v, ok := reflect.Select([]reflect.SelectCase{
+					{
+						Dir:  reflect.SelectRecv,
+						Chan: stopChanValue,
+					},
+					{
+						Dir:  reflect.SelectRecv,
+						Chan: chanValue,
+					},
+				})
+				switch chosen {
+				case 0:
+					s.Close()
+					return
+				default:
+					if !ok {
+						// TODO: check s.Err() for a special error sent from the
+						//       server indicating the stream should not be retried
+						break loop
+					}
+					id := v.Elem().FieldByName("ID")
+					if id.Kind() == reflect.Int64 {
+						lastID = id.Int()
+					}
+					outValue.Send(v)
+				}
 			}
 		}
 	}()

@@ -38,8 +38,7 @@ func (s *CLISuite) flynn(t *c.C, args ...string) *CmdResult {
 func (s *CLISuite) newCliTestApp(t *c.C) *cliTestApp {
 	app, _ := s.createApp(t)
 	events := make(chan *ct.JobEvent)
-	stream, err := s.controllerClient(t).StreamJobEvents(app.Name, 0, events)
-	t.Assert(err, c.IsNil)
+	stream := s.controllerClient(t).StreamJobEvents(app.Name, events)
 	return &cliTestApp{
 		name:   app.Name,
 		stream: stream,

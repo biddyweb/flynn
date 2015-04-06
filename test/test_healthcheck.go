@@ -96,8 +96,7 @@ func (s *HealthcheckSuite) TestKillDown(t *c.C) {
 		Check:  &host.HealthCheck{Type: "tcp", KillDown: true, StartTimeout: 2 * time.Second},
 	})
 	events := make(chan *ct.JobEvent)
-	stream, err := s.controllerClient(t).StreamJobEvents(app.ID, 0, events)
-	t.Assert(err, c.IsNil)
+	stream := s.controllerClient(t).StreamJobEvents(app.ID, events)
 	defer stream.Close()
 
 	t.Assert(flynn(t, "/", "-a", app.Name, "scale", "printer=1"), Succeeds)
