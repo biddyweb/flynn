@@ -111,6 +111,43 @@ func (s *PostgresSuite) TestDeploySingleAsync(t *c.C) {
 	})
 }
 
+func (s *PostgresSuite) TestDeploySystem(t *c.C) {
+	client := s.controllerClient(t)
+	app, err := client.GetApp("postgres")
+	t.Assert(err, c.IsNil)
+
+	release, err := client.GetAppRelease(app.ID)
+	release.ID = ""
+	t.Assert(client.CreateRelease(release), c.IsNil)
+	deployment, err := client.CreateDeployment(app.ID, release.ID)
+	t.Assert(err, c.IsNil)
+
+	events := make(chan *ct.DeploymentEvent)
+	eventStream, err := client.StreamDeployment(deployment.ID, events)
+	t.Assert(err, c.IsNil)
+	defer eventStream.Close()
+
+loop:
+	for {
+		select {
+		case e, ok := <-events:
+			if !ok {
+				t.Fatal("unexpected close of deployment event stream")
+			}
+			switch e.Status {
+			case "complete":
+				debug(t, "deployment complete")
+				break loop
+			case "failed":
+				t.Fatalf("deployment failed: %s", e.Error)
+			}
+			debugf(t, "got deployment event: %s %s", e.JobType, e.JobState)
+		case <-time.After(60 * time.Second):
+			t.Fatal("timed out waiting for deployment event")
+		}
+	}
+}
+
 func (s *PostgresSuite) testDeploy(t *c.C, d *pgDeploy) {
 	// create postgres app
 	client := s.controllerClient(t)
