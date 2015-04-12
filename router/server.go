@@ -9,7 +9,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/jackc/pgx"
+	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/pgx"
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/kavu/go_reuseport"
 	"github.com/flynn/flynn/discoverd/client"
 	"github.com/flynn/flynn/pkg/postgres"

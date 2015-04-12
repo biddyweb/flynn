@@ -7,7 +7,7 @@ import (
 	"time"
 
 	. "github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/go-check"
-	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/jackc/pgx"
+	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/flynn/pgx"
 	"github.com/flynn/flynn/appliance/postgresql/state"
 	"github.com/flynn/flynn/appliance/postgresql/xlog"
 	"github.com/flynn/flynn/discoverd/client"
