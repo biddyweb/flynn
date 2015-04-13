@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cznic/ql"
 	"github.com/flynn/flynn/pkg/random"
 )
 
@@ -120,24 +121,12 @@ func (i *Installer) SendEvent(event *Event) {
 		event.PromptID = event.Prompt.ID
 	}
 
-	i.dbMtx.Lock()
-	tx, err := i.db.Begin()
+	i.logger.Info(fmt.Sprintf("Event: %s: %s", event.Type, event.Description))
+
+	err := i.dbInsertItem("events", event)
 	if err != nil {
 		i.logger.Debug(err.Error())
-		tx.Rollback()
-		i.dbMtx.Unlock()
-		return
 	}
-	if _, err := tx.Exec(`INSERT INTO events (id, cluster, prompt, type, timestamp, description) VALUES (?, ?, ?, ?, ?, ?)`, event.ID, event.ClusterID, event.PromptID, event.Type, event.Timestamp.Format(time.RFC3339Nano), event.Description); err != nil {
-		i.logger.Debug(fmt.Sprintf("SendEvent Error: %s", err.Error()))
-		tx.Rollback()
-		i.dbMtx.Unlock()
-		return
-	}
-	tx.Commit()
-	i.dbMtx.Unlock()
-
-	i.logger.Info(fmt.Sprintf("Event: %s: %s", event.Type, event.Description))
 
 	for _, sub := range i.subscriptions {
 		go sub.SendEvents(i)
@@ -154,20 +143,10 @@ func (c *Cluster) findPrompt(id string) (*Prompt, error) {
 func (c *Cluster) sendPrompt(prompt *Prompt) *Prompt {
 	c.pendingPrompt = prompt
 
-	c.installer.dbMtx.Lock()
-	tx, err := c.installer.db.Begin()
-	if err != nil {
-		c.installer.logger.Debug("sendPrompt Begin error: %s", err.Error())
-		tx.Rollback()
-	} else {
-		if _, err := tx.Exec(`INSERT INTO prompts (id, cluster, type, message, yes, input, resolved) VALUES (?, ?, ?, ?, ?, ?, ?)`, prompt.ID, c.ID, prompt.Type, prompt.Message, prompt.Yes, prompt.Input, prompt.Resolved); err != nil {
-			c.installer.logger.Debug(fmt.Sprintf("sendPrompt SQL Error: %s", err.Error()))
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
+	insertErr := c.installer.dbInsertItem("prompts", prompt)
+	if insertErr != nil {
+		c.installer.logger.Debug(fmt.Sprintf("sendPrompt db insert error: %s", insertErr.Error()))
 	}
-	c.installer.dbMtx.Unlock()
 
 	c.sendEvent(&Event{
 		Type:      "prompt",
@@ -177,17 +156,12 @@ func (c *Cluster) sendPrompt(prompt *Prompt) *Prompt {
 
 	res := <-prompt.resChan
 	prompt.Resolved = true
+	prompt.Yes = res.Yes
+	prompt.Input = res.Input
 
-	tx, err = c.installer.db.Begin()
-	if err != nil {
-		c.installer.logger.Debug("sendPrompt res Begin error: %s", err.Error())
-		tx.Rollback()
-	} else {
-		if _, err := tx.Exec(`UPDATE prompts SET resolved = ? WHERE id = ?`, prompt.Resolved, prompt.ID); err != nil {
-			c.installer.logger.Debug(fmt.Sprintf("sendPrompt res SQL Error: %s", err.Error()))
-			tx.Rollback()
-		} else {
-			tx.Commit()
+	if insertErr == nil {
+		if err := c.dbUpdatePrompt(prompt); err != nil {
+			c.installer.logger.Debug(fmt.Sprintf("sendPrompt db update error: %s", err.Error()))
 		}
 	}
 
@@ -198,6 +172,52 @@ func (c *Cluster) sendPrompt(prompt *Prompt) *Prompt {
 	})
 
 	return res
+}
+
+func (c *Cluster) dbUpdatePrompt(prompt *Prompt) error {
+	c.installer.dbMtx.Lock()
+	defer c.installer.dbMtx.Unlock()
+
+	ctx := ql.NewRWCtx()
+	list, err := ql.Compile(`
+	BEGIN TRANSACTION;
+		UPDATE prompts SET Resolved = $1, Yes = $2, Input = $3 WHERE ID = $4;
+	COMMIT;`)
+	if err != nil {
+		return err
+	}
+	_, _, err = c.installer.db.Execute(ctx, list, prompt.Resolved, prompt.Yes, prompt.Input, prompt.ID)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (i *Installer) dbInsertItem(tableName string, item interface{}) error {
+	i.dbMtx.Lock()
+	defer i.dbMtx.Unlock()
+
+	fields, err := ql.Marshal(item)
+	if err != nil {
+		return err
+	}
+	vStr := make([]string, 0, len(fields))
+	for idx := range fields {
+		vStr = append(vStr, fmt.Sprintf("$%d", idx+1))
+	}
+	ctx := ql.NewRWCtx()
+	list, err := ql.Compile(fmt.Sprintf(`
+	BEGIN TRANSACTION;
+		INSERT INTO %q VALUES(%s);
+	COMMIT;`, tableName, strings.Join(vStr, ", ")))
+	if err != nil {
+		return err
+	}
+	_, _, err = i.db.Execute(ctx, list, fields...)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *Cluster) YesNoPrompt(msg string) bool {

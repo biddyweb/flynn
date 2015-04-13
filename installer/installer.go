@@ -137,9 +137,35 @@ func (i *Installer) FindAWSCredentials(id string) (aws.CredentialsProvider, erro
 	}
 	var secret string
 
-	// TODO(jvatic): Fetch credential from db
+	i.dbMtx.RLock()
+	defer i.dbMtx.RUnlock()
 
-	return aws.Creds(id, secret, ""), nil
+	ctx := ql.NewRWCtx()
+	list, err := ql.Compile(`
+		SELECT * FROM credentials WHERE id = $1 LIMIT 1
+	`)
+	if err != nil {
+		return nil, err
+	}
+	rs, _, err := i.db.Execute(ctx, list)
+	if err != nil {
+		return nil, err
+	}
+	if len(rs) == 0 {
+		return nil, errors.New("Credential not found")
+	}
+
+	cred := &credential{}
+	if err := rs[0].Do(false, func(data []interface{}) (bool, error) {
+		if err := ql.Unmarshal(cred, data); err != nil {
+			return false, err
+		}
+		return true, nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return aws.Creds(cred.ID, cred.Secret, ""), nil
 }
 
 func (i *Installer) FindCluster(id string) (*Cluster, error) {
@@ -161,9 +187,6 @@ func (i *Installer) FindCluster(id string) (*Cluster, error) {
 
 	// TODO(jvatic): Fetch cluster from db
 
-	if c.Creds, err = i.FindAWSCredentials(c.CredentialID); err != nil {
-		return nil, err
-	}
 	domain := &Domain{}
 
 	// TODO(jvatic): Fetch domain from db
@@ -181,9 +204,10 @@ func (i *Installer) DeleteCluster(id string) error {
 	}
 
 	i.clustersMtx.Lock()
-	clusters := make([]*Cluster, 0, len(i.clusters))
+	clusters := make([]interface{}, 0, len(i.clusters))
 	for _, c := range i.clusters {
-		if c.ID != id {
+		cID := reflect.Indirect(reflect.ValueOf(c)).FieldByName("ID").Interface().(string)
+		if cID != id {
 			clusters = append(clusters, c)
 		}
 	}
@@ -191,7 +215,7 @@ func (i *Installer) DeleteCluster(id string) error {
 	i.clustersMtx.Unlock()
 
 	// TODO(jvatic): remove from database once stack deletion complete
-	cluster.DeleteAWS()
+	// TODO(jvatic): find AWS cluster and run Delete()
 	i.SendEvent(&Event{ // TODO(jvatic): Send two events, one before cleanup and one after
 		Type:      "cluster_deleted",
 		ClusterID: id,
