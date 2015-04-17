@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"reflect"
@@ -15,7 +16,7 @@ import (
 var ClusterNotFoundError = errors.New("Cluster not found")
 
 type Installer struct {
-	db            *ql.DB
+	db            *sql.DB
 	events        []*Event
 	subscriptions []*Subscription
 	clusters      []interface{}
@@ -89,46 +90,46 @@ func (i *Installer) saveAWSCluster(c *AWSCluster) error {
 		clustersVStr = append(clustersVStr, fmt.Sprintf("$%d", idx+1))
 		fields = append(fields, f)
 	}
+	offset := len(clusterFields)
 	for idx, f := range awsFields {
-		awsVStr = append(awsVStr, fmt.Sprintf("$%d", idx+1))
+		awsVStr = append(awsVStr, fmt.Sprintf("$%d", idx+1+offset))
 		fields = append(fields, f)
 	}
 
-	ctx := ql.NewRWCtx()
 	list, err := ql.Compile(fmt.Sprintf(`
-	BEGIN TRANSACTION;
 		INSERT INTO clusters VALUES (%s);
 		INSERT INTO aws_clusters VALUES(%s);
-	COMMIT;`, strings.Join(clustersVStr, ", "), strings.Join(awsVStr, ", ")))
+	`, strings.Join(clustersVStr, ", "), strings.Join(awsVStr, ", ")))
 	if err != nil {
 		return err
 	}
-	_, _, err = i.db.Execute(ctx, list, fields...)
+	tx, err := i.db.Begin()
 	if err != nil {
 		return err
 	}
-
-	return nil
+	_, err = tx.Exec(list.String(), fields...)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (i *Installer) SaveAWSCredentials(id, secret string) error {
 	i.dbMtx.Lock()
 	defer i.dbMtx.Unlock()
-
-	ctx := ql.NewRWCtx()
-	list, err := ql.Compile(`
-	BEGIN TRANSACTION;
+	tx, err := i.db.Begin()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`
 		INSERT INTO credentials (ID, Secret) VALUES ($1, $2);
-	COMMIT;`)
+  `, id, secret)
 	if err != nil {
+		tx.Rollback()
 		return err
 	}
-	_, _, err = i.db.Execute(ctx, list, id, secret)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return tx.Commit()
 }
 
 func (i *Installer) FindAWSCredentials(id string) (aws.CredentialsProvider, error) {
@@ -140,42 +141,20 @@ func (i *Installer) FindAWSCredentials(id string) (aws.CredentialsProvider, erro
 	i.dbMtx.RLock()
 	defer i.dbMtx.RUnlock()
 
-	ctx := ql.NewRWCtx()
-	list, err := ql.Compile(`
-		SELECT * FROM credentials WHERE id = $1 LIMIT 1
-	`)
-	if err != nil {
+	if err := i.db.QueryRow(`SELECT Secret FROM credentials WHERE id == $1 LIMIT 1`, id).Scan(&secret); err != nil {
 		return nil, err
 	}
-	rs, _, err := i.db.Execute(ctx, list)
-	if err != nil {
-		return nil, err
-	}
-	if len(rs) == 0 {
-		return nil, errors.New("Credential not found")
-	}
-
-	cred := &credential{}
-	if err := rs[0].Do(false, func(data []interface{}) (bool, error) {
-		if err := ql.Unmarshal(cred, data); err != nil {
-			return false, err
-		}
-		return true, nil
-	}); err != nil {
-		return nil, err
-	}
-
-	return aws.Creds(cred.ID, cred.Secret, ""), nil
+	return aws.Creds(id, secret, ""), nil
 }
 
 func (i *Installer) FindCluster(id string) (*Cluster, error) {
 	i.clustersMtx.RLock()
 	for _, c := range i.clusters {
-		v := reflect.Indirect(reflect.ValueOf(c))
-		cluster := v.FieldByName("cluster").Interface().(*Cluster)
-		if cluster.ID == id {
-			i.clustersMtx.RUnlock()
-			return cluster, nil
+		if cluster, ok := c.(*AWSCluster); ok {
+			if cluster.ClusterID == id {
+				i.clustersMtx.RUnlock()
+				return cluster.cluster, nil
+			}
 		}
 	}
 	i.clustersMtx.RUnlock()
@@ -185,19 +164,29 @@ func (i *Installer) FindCluster(id string) (*Cluster, error) {
 
 	c := &Cluster{ID: id, installer: i}
 
-	// TODO(jvatic): Fetch cluster from db
+	err := i.db.QueryRow(`
+	SELECT CredentialID, Type, State, NumInstances, ControllerKey, ControllerPin, DashboardLoginToken, CACert, SSHKeyName, VpcCidr, SubnetCidr, DiscoveryToken, DNSZoneID FROM clusters WHERE ID == $1 LIMIT 1
+  `, c.ID).Scan(&c.CredentialID, &c.Type, &c.State, &c.NumInstances, &c.ControllerKey, &c.ControllerPin, &c.DashboardLoginToken, &c.CACert, &c.SSHKeyName, &c.VpcCidr, &c.SubnetCidr, &c.DiscoveryToken, &c.DNSZoneID)
+	if err != nil {
+		return nil, err
+	}
 
-	domain := &Domain{}
-
-	// TODO(jvatic): Fetch domain from db
-
-	c.Domain = domain
+	domain := &Domain{ClusterID: c.ID}
+	err = i.db.QueryRow(`
+  SELECT Name, Token FROM domains WHERE ClusterID == $1 LIMIT 1
+  `, c.ID).Scan(&domain.Name, &domain.Token)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if err == nil {
+		c.Domain = domain
+	}
 	return c, nil
 }
 
 func (i *Installer) DeleteCluster(id string) error {
 	i.dbMtx.Lock()
-	cluster, err := i.FindCluster(id)
+	_, err := i.FindCluster(id)
 	i.dbMtx.Unlock()
 	if err != nil {
 		return err

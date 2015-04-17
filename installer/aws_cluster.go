@@ -24,6 +24,24 @@ import (
 var DisallowedEC2InstanceTypes = []string{"t1.micro", "t2.micro", "t2.small", "m1.small"}
 var DefaultInstanceType = "m3.medium"
 
+func (c *AWSCluster) saveField(field string, value interface{}) error {
+	c.cluster.installer.dbMtx.Lock()
+	defer c.cluster.installer.dbMtx.Unlock()
+
+	tx, err := c.cluster.installer.db.Begin()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(fmt.Sprintf(`
+  UPDATE aws_clusters SET %s = $2 WHERE ClusterID == $1
+  `, field), c.ClusterID, value)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 func (c *AWSCluster) SetDefaultsAndValidate() error {
 	if c.InstanceType == "" {
 		c.InstanceType = DefaultInstanceType
@@ -232,7 +250,9 @@ func (c *AWSCluster) fetchImageID() (err error) {
 		return errors.New(fmt.Sprintf("No image found for region %s", c.Region))
 	}
 	c.ImageID = imageID
-	// TODO(jvaitc): save ImageID
+	if err := c.saveField("ImageID", imageID); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -269,7 +289,9 @@ func (c *AWSCluster) createStack() error {
 		return err
 	}
 	c.cluster.DiscoveryToken = discoveryToken
-	// TODO(jvatic): save DiscoveryToken
+	if err := c.cluster.saveField("DiscoveryToken", discoveryToken); err != nil {
+		return err
+	}
 
 	var stackTemplateBuffer bytes.Buffer
 	err = stackTemplate.Execute(&stackTemplateBuffer, &stackTemplateData{
@@ -341,7 +363,9 @@ func (c *AWSCluster) createStack() error {
 	}
 	c.StackID = *res.StackID
 
-	// TODO(jvatic): save StackID
+	if err := c.saveField("StackID", c.StackID); err != nil {
+		return err
+	}
 	return c.waitForStackCompletion("CREATE", stackEventsSince)
 }
 
@@ -484,7 +508,7 @@ func (c *AWSCluster) fetchStackOutputs() error {
 			c.DNSZoneID = v
 		}
 	}
-	if len(instanceIPs) != c.cluster.NumInstances {
+	if int64(len(instanceIPs)) != c.cluster.NumInstances {
 		return fmt.Errorf("expected stack outputs to include %d instance IPs but found %d", c.cluster.NumInstances, len(instanceIPs))
 	}
 	c.cluster.InstanceIPs = instanceIPs
@@ -493,8 +517,12 @@ func (c *AWSCluster) fetchStackOutputs() error {
 		return fmt.Errorf("stack outputs do not include DNSZoneID")
 	}
 
-	// TODO(jvatic): Save DNSZoneID
-	// TODO(jvatic): Save InstanceIPs
+	if err := c.saveField("DNSZoneID", c.DNSZoneID); err != nil {
+		return nil
+	}
+	if err := c.cluster.saveField("InstanceIPs", c.cluster.InstanceIPs); err != nil {
+		return nil
+	}
 
 	return nil
 }

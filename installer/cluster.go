@@ -17,6 +17,50 @@ import (
 	"github.com/flynn/flynn/pkg/etcdcluster"
 )
 
+func (c *Cluster) saveField(field string, value interface{}) error {
+	c.installer.dbMtx.Lock()
+	defer c.installer.dbMtx.Unlock()
+
+	var err error
+
+	tx, err := c.installer.db.Begin()
+	if err != nil {
+		return nil
+	}
+
+	if field == "InstanceIPs" {
+		insertStmt := ""
+		fields := make([]interface{}, 0, len(c.InstanceIPs)+1)
+		fields = append(fields, c.ID)
+		for i, ip := range c.InstanceIPs {
+			insertStmt += fmt.Sprintf("INSERT INTO instance_ips ClusterID, IP VALUES ($1, $%d);\n", i+2)
+			fields = append(fields, ip)
+		}
+		_, err = tx.Exec(fmt.Sprintf(`
+    DELETE FROM instance_ips WHERE ClusterID == $1;
+    %s
+    `, insertStmt), fields...)
+	} else if field == "Domain" {
+		_, err = tx.Exec(`
+    DELETE FROM domains WHERE ClusterID == $1;
+    INSERT INTO domains ClusterID, Name, Token VALUES ($1, $2, $3);
+    `, c.ID, c.Domain.Name, c.Domain.Token)
+	} else {
+		_, err = tx.Exec(fmt.Sprintf(`
+    UPDATE clusters SET %s = $2 WHERE ID == $1;
+    `, field), c.ID, value)
+	}
+	if err != nil {
+		tx.Rollback()
+		return nil
+	}
+	return tx.Commit()
+}
+
+func (c *Cluster) setState(state string) error {
+	return c.saveField("State", state)
+}
+
 func (c *Cluster) SetDefaultsAndValidate() error {
 	if c.NumInstances == 0 {
 		c.NumInstances = 1
@@ -71,8 +115,9 @@ func (c *Cluster) allocateDomain() error {
 	if err != nil {
 		return err
 	}
+	domain.ClusterID = c.ID
 	c.Domain = domain
-	// TODO(jvatic): Save domain to db
+	c.saveField("Domain", domain)
 	return nil
 }
 
@@ -229,7 +274,18 @@ func (c *Cluster) bootstrap() error {
 	c.CACert = controllerCertData.CACert
 	c.DashboardLoginToken = loginTokenData.Token
 
-	// TODO(jvatic): Save ControllerKey, ControllerPin, CACert, and DashboardLoginToken
+	if err := c.saveField("ControllerKey", c.ControllerKey); err != nil {
+		return err
+	}
+	if err := c.saveField("ControllerPin", c.ControllerPin); err != nil {
+		return err
+	}
+	if err := c.saveField("CACert", c.CACert); err != nil {
+		return err
+	}
+	if err := c.saveField("DashboardLoginToken", c.DashboardLoginToken); err != nil {
+		return err
+	}
 
 	if err := sess.Wait(); err != nil {
 		return err
@@ -273,12 +329,12 @@ func (c *Cluster) configureCLI() error {
 	return nil
 }
 
-func (c *Cluster) genStartScript(nodes int) (string, string, error) {
+func (c *Cluster) genStartScript(nodes int64) (string, string, error) {
 	var data struct {
 		DiscoveryToken string
 	}
 	var err error
-	data.DiscoveryToken, err = etcdcluster.NewDiscoveryToken(strconv.Itoa(nodes))
+	data.DiscoveryToken, err = etcdcluster.NewDiscoveryToken(strconv.FormatInt(nodes, 10))
 	if err != nil {
 		return "", "", err
 	}

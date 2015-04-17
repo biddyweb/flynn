@@ -40,7 +40,7 @@ type jsonInput struct {
 	Creds        jsonInputCreds `json:"creds"`
 	Region       string         `json:"region"`
 	InstanceType string         `json:"instance_type"`
-	NumInstances int            `json:"num_instances"`
+	NumInstances int64          `json:"num_instances"`
 	VpcCidr      string         `json:"vpc_cidr,omitempty"`
 	SubnetCidr   string         `json:"subnet_cidr,omitempty"`
 }

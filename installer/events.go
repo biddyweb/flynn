@@ -50,8 +50,8 @@ func (i *Installer) Subscribe(eventChan chan *Event, lastEventID string) {
 }
 
 func (i *Installer) GetEventsSince(eventID string) []*Event {
-	i.dbMtx.Lock()
-	defer i.dbMtx.Unlock()
+	i.dbMtx.RLock()
+	defer i.dbMtx.RUnlock()
 	events := make([]*Event, 0, len(i.events))
 	var ts time.Time
 	if eventID != "" {
@@ -62,26 +62,19 @@ func (i *Installer) GetEventsSince(eventID string) []*Event {
 			ts = time.Unix(0, nano)
 		}
 	}
-	// TODO(jvatic): Convert the below queries to use ql
-	rows, err := i.db.Query(`SELECT id, cluster, prompt, type, timestamp, description FROM events WHERE datetime(timestamp) >= datetime(?)`, ts.Truncate(time.Second).Format(time.RFC3339Nano))
+	rows, err := i.db.Query(`SELECT ID, ClusterID, PromptID, Type, Timestamp, Description FROM events WHERE Timestamp > $1 ORDER BY Timestamp DESC`, ts)
 	if err != nil {
 		i.logger.Debug(fmt.Sprintf("GetEventsSince SQL Error: %s", err.Error()))
 		return events
 	}
 	for rows.Next() {
 		event := &Event{}
-		var timestamp string
-		if err := rows.Scan(&event.ID, &event.ClusterID, &event.PromptID, &event.Type, &timestamp, &event.Description); err != nil {
+		if err := rows.Scan(&event.ID, &event.ClusterID, &event.PromptID, &event.Type, &event.Timestamp, &event.Description); err != nil {
 			i.logger.Debug(fmt.Sprintf("GetEventsSince Scan Error: %s", err.Error()))
 			continue
 		}
-		event.Timestamp, err = time.Parse(time.RFC3339Nano, timestamp)
-		if err != nil {
-			i.logger.Debug("event timestamp is not parsable")
-			continue
-		}
 		if !event.Timestamp.After(ts) {
-			// sqlite compares at too low a resolution
+			i.logger.Debug("GetEventsSince Timestamp compare didn't work correctly")
 			continue
 		}
 		if event.Type == "install_log" {
@@ -98,7 +91,7 @@ func (i *Installer) GetEventsSince(eventID string) []*Event {
 		}
 		if event.PromptID != "" {
 			p := &Prompt{}
-			if err := i.db.QueryRow(`SELECT id, type, message, yes, input, resolved FROM prompts WHERE id = ? AND cluster = ?`, event.PromptID, event.ClusterID).Scan(&p.ID, &p.Type, &p.Message, &p.Yes, &p.Input, &p.Resolved); err != nil {
+			if err := i.db.QueryRow(`SELECT ID, Type, Message, Yes, Input, Resolved FROM prompts WHERE ID = $1 AND cluster = $2`, event.PromptID, event.ClusterID).Scan(&p.ID, &p.Type, &p.Message, &p.Yes, &p.Input, &p.Resolved); err != nil {
 				i.logger.Debug(fmt.Sprintf("GetEventsSince Prompt Scan Error: %s", err.Error()))
 				continue
 			}
@@ -178,19 +171,22 @@ func (c *Cluster) dbUpdatePrompt(prompt *Prompt) error {
 	c.installer.dbMtx.Lock()
 	defer c.installer.dbMtx.Unlock()
 
-	ctx := ql.NewRWCtx()
 	list, err := ql.Compile(`
-	BEGIN TRANSACTION;
-		UPDATE prompts SET Resolved = $1, Yes = $2, Input = $3 WHERE ID = $4;
-	COMMIT;`)
+		UPDATE prompts SET Resolved = $1, Yes = $2, Input = $3 WHERE ID == $4;
+	`)
 	if err != nil {
 		return err
 	}
-	_, _, err = c.installer.db.Execute(ctx, list, prompt.Resolved, prompt.Yes, prompt.Input, prompt.ID)
+	tx, err := c.installer.db.Begin()
 	if err != nil {
 		return err
 	}
-	return nil
+	_, err = tx.Exec(list.String(), prompt.Resolved, prompt.Yes, prompt.Input, prompt.ID)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (i *Installer) dbInsertItem(tableName string, item interface{}) error {
@@ -205,19 +201,22 @@ func (i *Installer) dbInsertItem(tableName string, item interface{}) error {
 	for idx := range fields {
 		vStr = append(vStr, fmt.Sprintf("$%d", idx+1))
 	}
-	ctx := ql.NewRWCtx()
 	list, err := ql.Compile(fmt.Sprintf(`
-	BEGIN TRANSACTION;
-		INSERT INTO %q VALUES(%s);
-	COMMIT;`, tableName, strings.Join(vStr, ", ")))
+    INSERT INTO %s VALUES(%s);
+	`, tableName, strings.Join(vStr, ", ")))
 	if err != nil {
 		return err
 	}
-	_, _, err = i.db.Execute(ctx, list, fields...)
+	tx, err := i.db.Begin()
 	if err != nil {
 		return err
 	}
-	return nil
+	_, err = tx.Exec(list.String(), fields...)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (c *Cluster) YesNoPrompt(msg string) bool {

@@ -39,7 +39,7 @@ type Cluster struct {
 	Type                string            `json:"type"`                    // enum(aws)
 	State               string            `json:"state" ql:"index xState"` // enum(starting, error, running, deleting)
 	Name                string            `json:"name" ql:"-"`
-	NumInstances        int               `json:"num_instances"`
+	NumInstances        int64             `json:"num_instances"`
 	ControllerKey       string            `json:"controller_key,omitempty"`
 	ControllerPin       string            `json:"controller_pin,omitempty"`
 	DashboardLoginToken string            `json:"dashboard_login_token,omitempty"`
@@ -50,12 +50,17 @@ type Cluster struct {
 	VpcCidr             string            `json:"vpc_cidr_block,omitempty"`
 	SubnetCidr          string            `json:"subnet_cidr_block,omitempty"`
 	DiscoveryToken      string            `json:"discovery_token"`
-	InstanceIPs         []string          `json:"instance_ips,omitempty"`
+	InstanceIPs         []string          `json:"instance_ips,omitempty" ql:"-"`
 	DNSZoneID           string            `json:"dns_zone_id,omitempty"`
 
 	installer     *Installer
 	pendingPrompt *Prompt
 	done          bool
+}
+
+type InstanceIPs struct {
+	ClusterID string `ql:"index xCluster"`
+	IP        string
 }
 
 type Event struct {
@@ -65,8 +70,8 @@ type Event struct {
 	ClusterID   string    `json:"cluster_id",omitempty`
 	PromptID    string    `json:"-"`
 	Description string    `json:"description,omitempty"`
-	Prompt      *Prompt   `json:"prompt,omitempty" ql"-"`
-	Cluster     *Cluster  `json:"cluster,omitempty" ql"-"`
+	Prompt      *Prompt   `json:"prompt,omitempty" ql:"-"`
+	Cluster     *Cluster  `json:"cluster,omitempty" ql:"-"`
 }
 
 type Prompt struct {
@@ -82,20 +87,28 @@ type Prompt struct {
 
 func (i *Installer) migrateDB() error {
 	schemaInterfaces := map[interface{}]string{
-		(*credential)(nil): "credentials",
-		(*Cluster)(nil):    "clusters",
-		(*AWSCluster)(nil): "aws_clusters",
-		(*Event)(nil):      "events",
-		(*Prompt)(nil):     "prompts",
+		(*credential)(nil):  "credentials",
+		(*Cluster)(nil):     "clusters",
+		(*AWSCluster)(nil):  "aws_clusters",
+		(*Event)(nil):       "events",
+		(*Prompt)(nil):      "prompts",
+		(*InstanceIPs)(nil): "instance_ips",
+		(*Domain)(nil):      "domains",
 	}
 
-	for i, tableName := range schemaInterfaces {
-		schema, err := ql.Schema(i, tableName, nil)
+	tx, err := i.db.Begin()
+	if err != nil {
+		return err
+	}
+	for item, tableName := range schemaInterfaces {
+		schema, err := ql.Schema(item, tableName, nil)
 		if err != nil {
 			return err
 		}
-		if _, _, err := i.db.Execute(ql.NewRWCtx(), schema); err != nil {
+		if _, err := tx.Exec(schema.String()); err != nil {
+			tx.Rollback()
 			return err
 		}
 	}
+	return tx.Commit()
 }

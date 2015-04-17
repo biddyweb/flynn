@@ -2,13 +2,14 @@ package installer
 
 import (
 	"crypto/x509"
+	"database/sql"
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	"github.com/cznic/ql"
+	_ "github.com/cznic/ql/driver"
 	"github.com/flynn/flynn/cli/config"
 	"github.com/flynn/flynn/pkg/sshkeygen"
 )
@@ -28,9 +29,7 @@ func (i *Installer) openDB() error {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return err
 	}
-	db, err := ql.OpenFile(dbPath, &ql.Options{
-		CanCreate: true,
-	})
+	db, err := sql.Open("ql", dbPath)
 	if err != nil {
 		return err
 	}
